@@ -1,10 +1,11 @@
 """
 TODO: 
 ====
-1. backtest_day indexing
-2. start_cash_balance with respect to security_age
-3. current trading day, yahoo api does not provide current trading day data
+1. start_cash_balance with respect to security_age
+2. Take care of timezones or run the script in EST zone only
 """
+# yahooFinance provides last traded price as closing price, so we are good for trading. The resolution is pretty good. Nothing much to do here
+
 import datetime
 import json
 from json import JSONEncoder
@@ -32,7 +33,7 @@ model_parameters = {
     "mean_type": "+ve",                     # only consider stocks with +ve mean of ND. These stocks have been growing over the period of time
     "max_stocks_to_buy": 5,                 # number of stocks to buy at buy trigger. We can change this value to be more adaptive based on market cap of the security and other parameters.
     "prefer_beta": True,                    # favors stocks that has larger beta
-    "above_beta_mean": True,               # only biy stocks above mean beta value of s&p
+    "above_beta_mean": True,                # only biy stocks above mean beta value of s&p
 
     # Display test results. Debugging Tools
     "print_final_portfolio": False,         # Prints the portfolio list at the end of each backtest iteration
@@ -85,9 +86,10 @@ class NextDay:
         return self
 
     def __next__(self):
-        if self.backtest_day < -1:
+        if self.backtest_day < 0:
+            ret = self.backtest_day
             self.backtest_day += 1
-            return self.backtest_day
+            return ret
         else:
             raise StopIteration
 
@@ -96,9 +98,9 @@ class NextDay:
 
 
 class LocalBrokerage(brokerage):
-    def __init__(self, cash=10000, backtest_days=0):
+    def __init__(self, cash=10000, backtest_days=-1):
         self.backtest_days = backtest_days
-        self.backtest = backtest_days != 0
+        self.backtest = backtest_days != -1
         if os.path.exists("localbrokerage.json"):
             with open("localbrokerage.json", "r") as f:
                 self.account = json.load(f)
@@ -108,10 +110,13 @@ class LocalBrokerage(brokerage):
         self.stocks = si.tickers_sp500()
         self.stocks_ts = pd.DataFrame()
         for ticker in self.stocks:
-            if os.path.exists(os.path.join("history", ticker)):
+            if False and os.path.exists(os.path.join("history", ticker)):
                 data = pd.read_csv(os.path.join("history", ticker))
+                data['Date'] = pd.to_datetime(data['Date']).tz_localize(None)
+                data = data.set_index('Date')
             else:
                 data = yf.Ticker(ticker).history(period=model_parameters["history"])
+                data = data.set_index(data.index.tz_localize(None))
                 data.to_csv(os.path.join("history", ticker))
             d = data.copy()[['Open', 'Close']]
             self.stocks_ts[ticker+"_Open"] = d['Open']
@@ -154,8 +159,8 @@ class LocalBrokerage(brokerage):
     def has_stock(self, ticker):
         return ticker in self.account['portfolio']
 
-    def buy_a_stock(self, ticker, quantity, backtest_day=0):
-        close = self.stocks_ts[ticker+"_Close"][len(self.stocks_ts[ticker+"_Close"])+backtest_day]
+    def buy_a_stock(self, ticker, quantity, backtest_day=-1):
+        close = self.get_current_stock_price(ticker, backtest_day=backtest_day)
    
         portfolio = self.account['portfolio']
         if close * quantity > self.account['cash_balance']:
@@ -170,8 +175,8 @@ class LocalBrokerage(brokerage):
 
         return
 
-    def sell_a_stock(self, ticker, backtest_day=0):
-        close = self.stocks_ts[ticker+"_Close"][len(self.stocks_ts[ticker+"_Close"])+backtest_day]
+    def sell_a_stock(self, ticker, backtest_day=-1):
+        close = self.get_current_stock_price(ticker, backtest_day=backtest_day)
    
         if ticker not in self.account['portfolio']:
             raise Exception("We don't own any of these stocks")
@@ -187,12 +192,19 @@ class LocalBrokerage(brokerage):
 
         return
 
-    def get_current_stock_price(self, ticker, backtest_day=0):
-        close = self.stocks_ts[ticker+"_Close"][len(self.stocks_ts[ticker+"_Close"])+backtest_day]
+    def get_current_stock_price(self, ticker, backtest_day=-1):
+        if self.backtest:
+            close = self.stocks_ts[ticker+"_Close"][len(self.stocks_ts[ticker+"_Close"])+backtest_day]
+        else:
+            close = yf.Ticker(ticker).history("1d")['Close'][0]
         return close
 
-    def get_open_price_of_stock(self, ticker, backtest_day=0):
-        open = self.stocks_ts[ticker+"_Open"][len(self.stocks_ts[ticker+"_Open"])+backtest_day]
+    def get_open_price_of_stock(self, ticker, backtest_day=-1):
+        if self.backtest:
+            open = self.stocks_ts[ticker+"_Open"][len(self.stocks_ts[ticker+"_Open"])+backtest_day]
+        else:
+            open = yf.Ticker(ticker).history("1d")['Open'][0]
+
         return open
 
     def avg_cost_of_stock(self, ticker):
@@ -215,7 +227,7 @@ class LocalBrokerage(brokerage):
 
         return oldest
 
-    def netgain(self, ticker, backtest_day=0):
+    def netgain(self, ticker, backtest_day=-1):
         if ticker not in self.account["portfolio"]:
             raise Exception("Stock %s not found in portfolio" % ticker)
         netgain = 0
@@ -224,6 +236,13 @@ class LocalBrokerage(brokerage):
                                      e['cost'])
 
         return netgain
+
+    def calculate_networth(self, backtest_day=-1):
+       networth = self.cashbalance()
+       for ticker in self.get_stocks():
+           for e in self.account["portfolio"][ticker]:
+               networth += e['count'] * self.get_current_stock_price(ticker, backtest_day=backtest_day)
+       return networth
 
 
 class Model:
@@ -254,10 +273,13 @@ class Model:
         self.betas = self.betas.set_index('Ticker')
 
         for ticker in self.stocks:
-            if os.path.exists(os.path.join("history", ticker)):
+            if False and os.path.exists(os.path.join("history", ticker)):
                 data = pd.read_csv(os.path.join("history", ticker))
+                data['Date'] = pd.to_datetime(data['Date']).tz_localize(None)
+                data = data.set_index('Date')
             else:
                 data = yf.Ticker(ticker).history(period=model_parameters["history"])
+                data = data.set_index(data.index.tz_localize(None))
                 data.to_csv(os.path.join("history", ticker))
             d = data.copy()[['Open', 'Close']]
             self.stocks_ts[ticker+"_Open"] = d['Open']
@@ -306,7 +328,7 @@ class Model:
         fig = px.line(self.betas, title="Stocks Betas", markers=True)
         fig.show()
 
-    def _getsellbuy(self, backtest_day=0):
+    def _getsellbuy(self, backtest_day=-1):
         todays_delta = {}
         for ticker in self.stocks:
             open = self.brokerage.get_open_price_of_stock(ticker, backtest_day=backtest_day)
@@ -328,18 +350,17 @@ class Model:
 
         # Find stocks that are in sell range
         latest_diff['sell'] = False
-        today = pd.to_datetime(datetime.datetime.now())
+        index = self.stocks_ts.index[backtest_day]
         for ticker in self.stocks:
             if not self.brokerage.has_stock(ticker):
                 continue
 
             oldest = self.brokerage.oldest_stock(ticker)
-            t = today - pd.to_datetime(oldest)
+            t = index - pd.to_datetime(oldest)
 
             avg = self.brokerage.avg_cost_of_stock(ticker)
 
             netgain = self.brokerage.netgain(ticker, backtest_day=backtest_day)
-            index = self.stocks_ts.index[backtest_day]
             if avg + model_parameters["sell_trigger"] * self.std['std'][ticker] * avg / 100 <= self.brokerage.get_current_stock_price(ticker, backtest_day=backtest_day):
                 # If the avg cost of the security has grown more than std
                 # print(s, avg, portfolio[s]['costs'], std['std'][s+"_Diff"], stocks_ts.loc[index, s+"_Close"])
@@ -371,13 +392,7 @@ class Model:
             buy_stocks = buy_stocks.sort_values('beta',ascending=False)
         return sell_stocks, buy_stocks
 
-    def calculate_networth(self, backtest_day=0):
-       networth = self.brokerage.cashbalance()
-       for ticker in self.brokerage.get_stocks():
-           networth += self.brokerage.netgain(ticker, backtest_day=backtest_day)
-       return networth
-
-    def do_todays_trade(self, backtest_day=0):
+    def do_todays_trade(self, backtest_day=-1):
 
         sell, buy = self._getsellbuy(backtest_day=backtest_day)
 
@@ -385,7 +400,7 @@ class Model:
         for st in sell.iterrows():
             ticker = st[0].split('_')[0]
             self.brokerage.sell_a_stock(ticker, backtest_day=backtest_day)
-      
+
         # buy stocks that are marked by. We are buying max_stocks_to_buy number of stocks
         # TODO: The number of stocks to be must be adaptive. Will come up with some
         # algorithm based on:
@@ -399,11 +414,11 @@ class Model:
                 self.brokerage.buy_a_stock(ticker, model_parameters["max_stocks_to_buy"], backtest_day=backtest_day)
 
         # lock in the gains after 10% increase of networth
-        nw = self.calculate_networth(backtest_day=backtest_day)
+        nw = self.brokerage.calculate_networth(backtest_day=backtest_day)
         self.price_movement.append(nw)
         self.cash_inhand.append(self.brokerage.cashbalance())
         if nw > model_parameters["start_cash_balance"] * model_parameters["lockin_gains_factor"]:
-            #print(backtest_start_date, calculate_networth(backtest_start_date), current_account, portfolio)
+            #print(backtest_start_date, self.brokerage.calculate_networth(backtest_start_date), current_account, portfolio)
             for ticker in self.brokerage.get_stocks():
                 self.brokerage.sell_a_stock(ticker, backtest_day=backtest_day)
         return 
@@ -423,7 +438,7 @@ class Model:
         for i in self.brokerage.day_iter():
             self.do_todays_trade(backtest_day=i)
 
-        networth = self.calculate_networth(backtest_day=i)
+        networth = self.brokerage.calculate_networth()
 
         # normalize s&p500 for starting balance
         idx_list = list(self.indices_ts.loc[self.indices_ts.index[-self.brokerage.backtest_day():], "^GSPC_Close"] *
@@ -431,14 +446,19 @@ class Model:
         pm_pct = (self.price_movement[-1]-model_parameters["start_cash_balance"]) * 100/model_parameters["start_cash_balance"]
 
         d = pd.DataFrame({'Portfolio_Performance':self.price_movement,'SP_Performance':idx_list, "Cash_In_Hand": self.cash_inhand})
-        d.index = indices_ts.index[-self.brokerage.backtest_day():]
+        d.index = self.indices_ts.index[-self.brokerage.backtest_day():]
         idx_pct = (idx_list[-1] - idx_list[0])*100/idx_list[0]
-        print("Total networth: %d (Cash %d) after going back %d days (%s)" % (networth, self.brokerage.cashbalance(), self.brokerage.backtest_day(), stocks_ts.index[-self.brokerage.backtest_day()]))
+        print("Total networth: %d (Cash %d) after going back %d days (%s)" % 
+              (networth, self.brokerage.cashbalance(),
+               self.brokerage.backtest_day(),
+               self.stocks_ts.index[-self.brokerage.backtest_day()]))
         print("Model (%f)%% vs S&P Performance (%f)%%" % (pm_pct, idx_pct))
-        if print_final_portfolio:
+        if model_parameters["print_final_portfolio"]:
             pp.pprint(portfolio)
-        if plot_every_test_graph:
-            fig = px.line(d, title="Model (%f)%% vs S&P Performance (%f)%% starting at %s" % (pm_pct, idx_pct, stocks_ts.index[-self.brokerage.backtest_day()]), markers=True)
+        if model_parameters["plot_every_test_graph"]:
+            fig = px.line(d, title="Model (%f)%% vs S&P Performance (%f)%% starting at %s" % 
+                          (pm_pct, idx_pct, self.stocks_ts.index[-self.brokerage.backtest_day()]),
+                           markers=True)
             fig.show()
 
 
