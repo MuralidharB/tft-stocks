@@ -3,6 +3,11 @@ TODO:
 ====
 1. start_cash_balance with respect to security_age
 2. Take care of timezones or run the script in EST zone only
+
+3. Robinhood does not have the transaction date. we need to find a way to save and use date on which he security is bought
+4. stocks removed from s&p500() that we still hold
+
+5. portfolio.stock.date reflects the first time the security is bought even after multiple purchases?
 """
 # yahooFinance provides last traded price as closing price, so we are good for trading. The resolution is pretty good. Nothing much to do here
 
@@ -20,9 +25,12 @@ import matplotlib.pyplot as plt
 
 import yfinance as yf
 import yahoo_fin.stock_info as si
+import robin_stocks.robinhood as r
+from dotenv import load_dotenv
 
 pp = pprint.PrettyPrinter(indent=4)
 
+tzname = 'America/New_York'
 
 model_parameters = {
     "history": "7y",                        # history to consider std and mean of stock daily price change
@@ -116,13 +124,13 @@ class LocalBrokerage(brokerage):
                 data = data.set_index('Date')
             else:
                 data = yf.Ticker(ticker).history(period=model_parameters["history"])
-                data = data.set_index(data.index.tz_localize(None))
                 data.to_csv(os.path.join("history", ticker))
             d = data.copy()[['Open', 'Close']]
             self.stocks_ts[ticker+"_Open"] = d['Open']
             self.stocks_ts[ticker+"_Close"] = d['Close']
 
             self.stocks_ts = self.stocks_ts.copy()
+        self.stocks_ts.index = self.stocks_ts.index.tz_convert(tzname)
 
     def __enter__(self):
         return self
@@ -245,6 +253,103 @@ class LocalBrokerage(brokerage):
        return networth
 
 
+class RobinhoodBrokerage(brokerage):
+    def __init__(self):
+        load_dotenv()
+        r.login(username=os.environ['robin_username'],
+                password=os.environ['robin_password'],
+                expiresIn=86400,
+                by_sms=True)
+        positions = r.get_open_stock_positions()
+        my_stocks = r.build_holdings()
+        self.portfolio = {}
+        for p in positions:
+            ticker = r.get_symbol_by_url(p["instrument"])
+            if float(my_stocks[ticker]['quantity']) > 0:
+                self.portfolio[ticker] = {'count': float(my_stocks[ticker]['quantity']),
+                                          'cost': float(my_stocks[ticker]['average_buy_price']),
+                                          'date': pd.Timestamp(p['created_at']).tz_convert(tzname)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        r.logout()
+
+    def cashbalance(self):
+        return float(r.load_phoenix_account()['account_buying_power']['amount'])
+
+    def get_stocks(self):
+        return list(portfolio.keys())
+
+    def has_stock(self, ticker):
+        return ticker in self.portfolio
+
+    def get_stock_holdings(self, ticker):
+        if not self.has_stock(ticker):
+            raise Exception("Stock %s not found" % ticker)
+ 
+        return porfolio[ticker]
+
+    def buy_a_stock(self, ticker, quantity, backtest_day=-1):
+        cost = self.get_current_stock_price(ticker)
+        if self.cashbalance() > quantity * cost:
+            t = pd.Timestamp.now(tz=tzname)
+            t = t.tz_convert(tzname)
+            self.portfolio[ticker] = {'count': quantity,
+                                      'cost': cost,
+                                      'date': t
+                                     }
+          
+        print(self.portfolio)
+        #raise Exception("Not Implemented")
+
+    def sell_a_stock(self, ticker, backtest_day=-1):
+        assert self.has_stock(ticker)
+ 
+        self.portfolio.pop(ticker) 
+        #raise Exception("Not Implemented")
+
+    def get_current_stock_price(self, ticker, backtest_day=-1):
+        close = yf.Ticker(ticker).history("1d")['Close'][0]
+   
+        return close
+
+    def get_open_price_of_stock(self, ticker, backtest_day=-1):
+        assert backtest_day == -1
+
+        open = yf.Ticker(ticker).history("1d")['Open'][0]
+
+        return open
+
+    def avg_cost_of_stock(self, ticker):
+        if not self.has_stock(ticker):
+            raise Exception("Stock %s not found" % ticker)
+
+        return self.portfolio[ticker]['cost']
+
+    def oldest_stock(self, ticker):
+        if not self.has_stock(ticker):
+            raise Exception("Stock %s not found" % ticker)
+
+        return self.portfolio[ticker]['date']
+
+    def netgain(self, ticker, backtest_day=-1):
+        if not self.has_stock(ticker):
+            raise Exception("Stock %s not found" % ticker)
+
+        holdings = r.build_holdings()[ticker]
+        return holdings['equity_change']
+
+    def calculate_networth(self, backtest_day=-1):
+       networth = self.cashbalance()
+
+       for ticker, value in r.build_holdings().items():
+           networth += float(value['equity'])
+
+       return networth
+
+
 class Model:
     # Read the last few years of stocks and indices to calculate betas and standard deviations
     def __init__(self, brokerage):
@@ -267,19 +372,18 @@ class Model:
             self.indices_ts[idx+"_Open"] = d['Open']
             self.indices_ts[idx+"_Close"] = d['Close']
 
-        self.betas = pd.read_csv("betas.csv")
-        self.betas = self.betas.drop(['index', 'Attribute', 'Unnamed: 0.1', 'Unnamed: 0'], axis=1)
+        self.betas = pd.read_csv("betas-sp500.csv")
+        self.betas = self.betas.drop(['Unnamed: 0'], axis=1)
         self.betas = self.betas.rename(columns={"Recent": "Beta"})
         self.betas = self.betas.set_index('Ticker')
 
         for ticker in self.stocks:
             if False and os.path.exists(os.path.join("history", ticker)):
                 data = pd.read_csv(os.path.join("history", ticker))
-                data['Date'] = pd.to_datetime(data['Date']).tz_localize(None)
+                data['Date'] = pd.to_datetime(data['Date']).tz_convert(tzname)
                 data = data.set_index('Date')
             else:
                 data = yf.Ticker(ticker).history(period=model_parameters["history"])
-                data = data.set_index(data.index.tz_localize(None))
                 data.to_csv(os.path.join("history", ticker))
             d = data.copy()[['Open', 'Close']]
             self.stocks_ts[ticker+"_Open"] = d['Open']
@@ -289,6 +393,8 @@ class Model:
             self.stocks_ts = self.stocks_ts.copy()
             self.stocks_spread = self.stocks_spread.copy()
 
+        self.indices_ts.index = self.indices_ts.index.tz_convert(tzname)
+        self.stocks_ts.index = self.stocks_ts.index.tz_convert(tzname)
         self.std = self.stocks_spread.describe().loc['std']
         self.mean = self.stocks_spread.describe().loc['mean']
         self.std = pd.DataFrame.from_dict(self.std)
@@ -300,7 +406,7 @@ class Model:
 
 
     def analyze_a_stock(self, ticker):
-        data = yf.Ticker(ticker).history(period=history)
+        data = yf.Ticker(ticker).history(period=model_parameters["history"])
         fig = go.Figure(data=[go.Candlestick(x=data.index,
                         open=data['Open'],
                         high=data['High'],
@@ -482,10 +588,23 @@ with LocalBrokerage(cash=10000) as lb:
 
 with LocalBrokerage(cash=10000) as lb:
     pp.pprint(lb.account)
-"""
 
 with LocalBrokerage(cash=10000, backtest_days=150) as lb:
     m = Model(lb)
     #m.analyze_a_stock('AAPL')
     #m.analyze_std_mean()
     m.do_backtest()
+
+
+with LocalBrokerage(cash=10000) as lb:
+    m = Model(lb)
+    #m.analyze_a_stock('AAPL')
+    #m.analyze_std_mean()
+    m.do_todays_trade()
+"""
+
+with RobinhoodBrokerage() as lb:
+    m = Model(lb)
+    m.analyze_a_stock('AAPL')
+    m.analyze_std_mean()
+    m.do_todays_trade()
