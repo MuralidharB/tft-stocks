@@ -176,9 +176,12 @@ class LocalBrokerage(brokerage):
 
         if ticker not in portfolio:
             portfolio[ticker] = []
+        t = pd.Timestamp.now(tz=tzname)
+        t = t.tz_convert(tzname)
         portfolio[ticker].append({"count": quantity,
                                   "cost": close,
-                                  "date": datetime.datetime.now()})
+                                  "date": str(t)
+                                 })
         self.account['cash_balance'] -= quantity * close
 
         return
@@ -228,10 +231,10 @@ class LocalBrokerage(brokerage):
         if ticker not in self.account["portfolio"]:
             raise Exception("Stock %s not found in portfolio" % ticker)
 
-        oldest = pd.to_datetime(self.account["portfolio"][ticker][0]['date'])
+        oldest = pd.Timestamp(self.account["portfolio"][ticker][0]['date']).tz_convert(tzname)
         for e in self.account["portfolio"][ticker]:
-            if oldest > pd.to_datetime(e['date']):
-                oldest = pd.to_datetime(e['date'])
+            if oldest > pd.Timestamp(e['date']).tz_convert(tzname):
+                oldest = pd.Timestamp(e['date']).tz_convert(tzname)
 
         return oldest
 
@@ -268,7 +271,7 @@ class RobinhoodBrokerage(brokerage):
             if float(my_stocks[ticker]['quantity']) > 0:
                 self.portfolio[ticker] = {'count': float(my_stocks[ticker]['quantity']),
                                           'cost': float(my_stocks[ticker]['average_buy_price']),
-                                          'date': pd.Timestamp(p['created_at']).tz_convert(tzname)}
+                                          'date': pd.Timestamp(p['updated_at']).tz_convert(tzname)}
 
     def __enter__(self):
         return self
@@ -339,7 +342,7 @@ class RobinhoodBrokerage(brokerage):
             raise Exception("Stock %s not found" % ticker)
 
         holdings = r.build_holdings()[ticker]
-        return holdings['equity_change']
+        return float(holdings['equity_change'])
 
     def calculate_networth(self, backtest_day=-1):
        networth = self.cashbalance()
@@ -462,7 +465,7 @@ class Model:
                 continue
 
             oldest = self.brokerage.oldest_stock(ticker)
-            t = index - pd.to_datetime(oldest)
+            t = index - oldest
 
             avg = self.brokerage.avg_cost_of_stock(ticker)
 
@@ -484,7 +487,7 @@ class Model:
                     print("Dumping %s(beta %f) because of age. closing price %f. netgain %f" %
                           (ticker, self.betas['Beta'][ticker], netgain),
                           self.get_stock_holdings(ticker))
-                if loss > 0:
+                if netgain > 0:
                         self.security_profit.loc[len(self.security_profit.index)] = {'beta':self.betas['Beta'][ticker],
                                                                            'days':t.days, 'profit':netgain}
                 else:
@@ -595,16 +598,16 @@ with LocalBrokerage(cash=10000, backtest_days=150) as lb:
     #m.analyze_std_mean()
     m.do_backtest()
 
-
+"""
 with LocalBrokerage(cash=10000) as lb:
     m = Model(lb)
     #m.analyze_a_stock('AAPL')
     #m.analyze_std_mean()
     m.do_todays_trade()
 """
-
 with RobinhoodBrokerage() as lb:
     m = Model(lb)
     m.analyze_a_stock('AAPL')
     m.analyze_std_mean()
     m.do_todays_trade()
+"""
