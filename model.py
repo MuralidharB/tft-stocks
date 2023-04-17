@@ -36,7 +36,7 @@ model_parameters = {
     "history": "7y",                        # history to consider std and mean of stock daily price change
     "buy_trigger": 2,                       # times standard deviation
     "sell_trigger": 1,                      # times the avg cost of the security to grow before we sell
-    "security_age": 90,                     # number of days to hold the security before we cut the losses
+    "security_age": 20,                     # number of days to hold the security before we cut the losses
     "lockin_gains_factor": 1000,            # times the orignal amount to grow before we lockin the gains.
     "mean_type": "+ve",                     # only consider stocks with +ve mean of ND. These stocks have been growing over the period of time
     "max_stocks_to_buy": 5,                 # number of stocks to buy at buy trigger. We can change this value to be more adaptive based on market cap of the security and other parameters.
@@ -607,7 +607,7 @@ with LocalBrokerage(cash=10000) as lb:
 """
 with RobinhoodBrokerage() as lb:
     m = Model(lb)
-    m.analyze_a_stock('AAPL')
-    m.analyze_std_mean()
+    #m.analyze_a_stock('AAPL')
+    #m.analyze_std_mean()
     m.do_todays_trade()
 """
