@@ -39,7 +39,7 @@ model_parameters = {
     "security_age": 20,                     # number of days to hold the security before we cut the losses
     "lockin_gains_factor": 1000,            # times the orignal amount to grow before we lockin the gains.
     "mean_type": "+ve",                     # only consider stocks with +ve mean of ND. These stocks have been growing over the period of time
-    "max_stocks_to_buy": 5,                 # number of stocks to buy at buy trigger. We can change this value to be more adaptive based on market cap of the security and other parameters.
+    "max_stocks_to_buy": 1,                 # number of stocks to buy at buy trigger. We can change this value to be more adaptive based on market cap of the security and other parameters.
     "prefer_beta": True,                    # favors stocks that has larger beta
     "above_beta_mean": True,                # only biy stocks above mean beta value of s&p
 
@@ -258,7 +258,6 @@ class LocalBrokerage(brokerage):
 
 class RobinhoodBrokerage(brokerage):
     def __init__(self):
-        load_dotenv()
         r.login(username=os.environ['robin_username'],
                 password=os.environ['robin_password'],
                 expiresIn=86400,
@@ -297,21 +296,28 @@ class RobinhoodBrokerage(brokerage):
     def buy_a_stock(self, ticker, quantity, backtest_day=-1):
         cost = self.get_current_stock_price(ticker)
         if self.cashbalance() > quantity * cost:
-            t = pd.Timestamp.now(tz=tzname)
-            t = t.tz_convert(tzname)
-            self.portfolio[ticker] = {'count': quantity,
-                                      'cost': cost,
-                                      'date': t
-                                     }
+            order = r.order_buy_market(ticker, quantity, jsonify=False)
+            if order.status_code in [200, 201]:
+                my_stocks = r.build_holdings()
+                t = pd.Timestamp.now(tz=tzname)
+                t = t.tz_convert(tzname)
+                if float(my_stocks[ticker]['quantity']) > 0:
+                    self.portfolio[ticker] = {'count': float(my_stocks[ticker]['quantity']),
+                                              'cost': float(my_stocks[ticker]['average_buy_price']),
+                                              'date': pd.Timestamp(p['updated_at']).tz_convert(tzname)}
           
+        else:
+            print("Failed to execute the order for %s" % ticker)
         print(self.portfolio)
-        #raise Exception("Not Implemented")
 
     def sell_a_stock(self, ticker, backtest_day=-1):
         assert self.has_stock(ticker)
  
-        self.portfolio.pop(ticker) 
-        #raise Exception("Not Implemented")
+        order = r.order_sell_market(ticker, quantity)
+        if order.status_code in [200, 201]:
+            self.portfolio.pop(ticker) 
+            print("Sold %s successfully" % ticker)
+        print(self.portfolio)
 
     def get_current_stock_price(self, ticker, backtest_day=-1):
         close = yf.Ticker(ticker).history("1d")['Close'][0]
@@ -571,43 +577,16 @@ class Model:
             fig.show()
 
 
-"""
-with LocalBrokerage(cash=10000) as lb:
-    if lb.cashbalance() > lb.get_current_stock_price('aapl') * 5:
-        lb.buy_a_stock('aapl', 5)
-    else:
-        print("Don't have enough cash to buy AAPL")
-    if lb.cashbalance() > lb.get_current_stock_price('msft') * 5:
-        lb.buy_a_stock('msft', 5)
-    else:
-        print("Don't have enough cash to buy MSFT")
-    if lb.cashbalance() > lb.get_current_stock_price('cost') * 5:
-        lb.buy_a_stock('cost', 5)
-    else:
-        print("Don't have enough cash to buy COST")
-
-    if 'cost' in lb.get_stocks():
-        lb.sell_a_stock('cost')
-
-with LocalBrokerage(cash=10000) as lb:
-    pp.pprint(lb.account)
-
-with LocalBrokerage(cash=10000, backtest_days=150) as lb:
-    m = Model(lb)
-    #m.analyze_a_stock('AAPL')
-    #m.analyze_std_mean()
-    m.do_backtest()
-
-"""
-with LocalBrokerage(cash=10000) as lb:
-    m = Model(lb)
-    #m.analyze_a_stock('AAPL')
-    #m.analyze_std_mean()
-    m.do_todays_trade()
-"""
-with RobinhoodBrokerage() as lb:
-    m = Model(lb)
-    #m.analyze_a_stock('AAPL')
-    #m.analyze_std_mean()
-    m.do_todays_trade()
-"""
+load_dotenv()
+if os.environ.get('robin_username', None) and os.environ.get('robin_password', None):
+    with RobinhoodBrokerage() as lb:
+        m = Model(lb)
+        # m.analyze_a_stock('AAPL')
+        # m.analyze_std_mean()
+        m.do_todays_trade()
+else:
+    with LocalBrokerage(cash=1000) as lb:
+        m = Model(lb)
+        # m.analyze_a_stock('AAPL')
+        # m.analyze_std_mean()
+        m.do_todays_trade()
