@@ -167,7 +167,7 @@ class LocalBrokerage(brokerage):
     def has_stock(self, ticker):
         return ticker in self.account['portfolio']
 
-    def buy_a_stock(self, ticker, quantity, backtest_day=-1):
+    def buy_a_stock(self, ticker, quantity, backtest_day=-1, limit=0):
         close = self.get_current_stock_price(ticker, backtest_day=backtest_day)
    
         portfolio = self.account['portfolio']
@@ -293,7 +293,8 @@ class RobinhoodBrokerage(brokerage):
  
         return porfolio[ticker]
 
-    def buy_a_stock(self, ticker, quantity, backtest_day=-1):
+    def buy_a_stock(self, ticker, quantity, backtest_day=-1, limit=0):
+        import pdb;pdb.set_trace()
         cost = self.get_current_stock_price(ticker)
         if self.cashbalance() > quantity * cost:
             order = r.order_buy_market(ticker, quantity, jsonify=False)
@@ -304,16 +305,27 @@ class RobinhoodBrokerage(brokerage):
                 if float(my_stocks[ticker]['quantity']) > 0:
                     self.portfolio[ticker] = {'count': float(my_stocks[ticker]['quantity']),
                                               'cost': float(my_stocks[ticker]['average_buy_price']),
-                                              'date': pd.Timestamp(p['updated_at']).tz_convert(tzname)}
-          
+                                              'date': pd.Timestamp(t).tz_convert(tzname)}
+                try:
+                    if limit:
+                        order = r.order_sell_limit(ticker, quantity, limit, jsonify=True)
+                        if not order.status_code in [200, 201]:
+                            print("Cannot set limit order on '%s'" % ticker)
+                except:
+                    pass
+
         else:
             print("Failed to execute the order for %s" % ticker)
         print(self.portfolio)
 
-    def sell_a_stock(self, ticker, backtest_day=-1):
+    def sell_a_stock(self, ticker, quantity=1, backtest_day=-1):
+        import pdb;pdb.set_trace()
         assert self.has_stock(ticker)
  
-        order = r.order_sell_market(ticker, quantity)
+        for item in r.get_all_open_stock_orders():
+            if r.get_symbol_by_url(item["instrument"]) == ticker:
+                r.cancel_stock_order(item["id"])
+        order = r.order_sell_market(ticker, quantity, jsonify=False)
         if order.status_code in [200, 201]:
             self.portfolio.pop(ticker) 
             print("Sold %s successfully" % ticker)
@@ -526,7 +538,11 @@ class Model:
         for st in buy.iterrows():
             ticker = st[0].split('_')[0]
             if self.brokerage.cashbalance() > self.brokerage.get_current_stock_price(ticker, backtest_day=backtest_day) * model_parameters["max_stocks_to_buy"]:
-                self.brokerage.buy_a_stock(ticker, model_parameters["max_stocks_to_buy"], backtest_day=backtest_day)
+                self.brokerage.buy_a_stock(ticker,
+                                           model_parameters["max_stocks_to_buy"],
+                                           backtest_day=backtest_day)
+                                           #limit=self.brokerage.get_current_stock_price(ticker,
+                                                #backtest_day=backtest_day)+self.std['std'][ticker])
 
         # lock in the gains after 10% increase of networth
         nw = self.brokerage.calculate_networth(backtest_day=backtest_day)
