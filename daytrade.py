@@ -38,7 +38,8 @@ sell_trigger = 1                          # times the avg cost of the security t
 security_age = 15                         # number of days to hold the security before we cut the losses
 lockin_gains_factor = 1000                # times the orignal amount to grow before we lockin the gains.
 mean_type = "+ve"                         # only consider stocks with +ve mean of ND. These stocks have been growing over the period of time
-max_stocks_to_buy = 1                     # number of stocks to buy at buy trigger. We can change this value to be more adaptive based on market cap of the security and other parameters.
+max_stocks_to_buy = 5                     # number of stocks to buy at buy trigger. We can change this value to be 
+                                          # more adaptive based on market cap of the security and other parameters.
 backtest_iterations = 1                   # number of backtests to run
 backtest_days = random.sample(range(100, 700), backtest_iterations) # starting days for back testing
 backtest_days.sort()
@@ -197,9 +198,9 @@ tests = [
      },
      {
         "Name": "Test 13 (DayTrade)",
-        "buy_trigger": 4,
+        "buy_trigger": 6,
         "sell_trigger": 1,
-        "security_age": 5,
+        "security_age": 1,
         "lockin_gains_factor": 1000,
         "prefer_beta": True,
         "mean_type": "",
@@ -219,6 +220,8 @@ indices = list(stock_indexes.values())
 
 if index_stocks == "SP500":
   stocks = si.tickers_sp500()
+  if 'FRC' in stocks:
+      stocks.remove('FRC')
 elif index_stocks == "NASDAQ":
   stock_data = PyTickerSymbols()
   stocks = stock_data.get_nasdaq_100_nyc_yahoo_tickers()
@@ -323,11 +326,8 @@ fig = px.line(std_delta2, title="Daily High Price", markers=True)
 def getsellbuy(portfolio, security_profit, security_loss):
   latest = {}
   index = stks['A'].index[0]
-  try:
-      for s in stocks:
-          latest[s] = (stks[s].loc[index]["Close"] - stocks_ts.loc[index][s+"_Open"])* 100 /stocks_ts.loc[index][s+"_Open"]
-  except:
-      import pdb;pdb.set_trace()
+  for s in stocks:
+      latest[s] = (stks[s].loc[index]["Close"] - stocks_ts.loc[index][s+"_Open"])* 100 /stocks_ts.loc[index][s+"_Open"]
 
   latest = pd.Series(latest)
   pd.DataFrame.from_dict(latest)
@@ -341,7 +341,7 @@ def getsellbuy(portfolio, security_profit, security_loss):
   # also lets avoid outliers too. If the fall is too steep, we don't want to consider it
   latest_diff['buy'] = np.where(((latest_diff['diff'] < 0) &
                                  (latest_diff['diff'] <  -1 * buy_trigger * std_delta1['std_delta1']) &
-                                 (latest_diff['diff'] > -6 * std_delta1['std_delta1'])), True, False)
+                                 (latest_diff['diff'] > -(buy_trigger + 2) * std_delta1['std_delta1'])), True, False)
 
   # Find stocks that are in sell range
   latest_diff['sell'] = False #np.where((latest_diff['diff'] >= std['std']), True, False)
@@ -359,17 +359,20 @@ def getsellbuy(portfolio, security_profit, security_loss):
                 (s, stks[s].loc[index, "Close"], profit, t.days), portfolio[s])
         security_profit.loc[len(security_profit.index)] = {'days':t.days, 'profit':profit}
         latest_diff.at[s, 'sell'] = True
-      elif t.days > security_age:
+      elif t.days > security_age or \
+             latest_diff['diff'][s] < -(buy_trigger + 2) * std_delta1['std_delta1'][s]:
+
         # if the security has aged for certain days, cut the losses
         loss = len(portfolio[s]['costs']) * stks[s].loc[index, "Close"] - sum(portfolio[s]['costs'])
         if dump_all_trades:
           print("Dumping %s because of age. closing price %f. loss %f" %
-                (s, stks[s].loc[index, "Close"], loss),portfolio[s])
+                (s, stks[s].loc[index, "Close"], loss), portfolio[s])
         if loss > 0:
           security_profit.loc[len(security_profit.index)] = {'days':t.days, 'profit':loss}
         else:
           security_loss.loc[len(security_loss.index)] = {'loss':loss}
         latest_diff.at[s, 'sell'] = True
+      
   
   # Print which stocks are buy and which are sell
   #print("Stock to Buy on " + str(index))
@@ -427,18 +430,27 @@ def do_one_backtesting():
         #pd.to_datetime(datetime.now(timezone.utc)) > pd.to_datetime(hrs['opens_at']):
   while True:
       # Load test data
-      for i in stocks:
-          stks[i] = pd.DataFrame()
-          data = yahooFinance.Ticker(i).history("1d")
-          d = data.copy()[['High', 'Low', "Open", "Close"]]
-          stks[i]['High'] = d['High']
-          stks[i]['Low'] = d['Low']
-          stks[i]['Open'] = d['Open']
-          stks[i]['Close'] = d['Close']
-          stks[i].index = stks[i].index.tz_convert(tzname)
+      try:
+          for i in stocks:
+              try:
+                  data = yahooFinance.Ticker(i).history("1d")
+                  stks[i] = pd.DataFrame()
+                  d = data.copy()[['High', 'Low', "Open", "Close"]]
+                  stks[i]['High'] = d['High']
+                  stks[i]['Low'] = d['Low']
+                  stks[i]['Open'] = d['Open']
+                  stks[i]['Close'] = d['Close']
+                  stks[i].index = stks[i].index.tz_convert(tzname)
+              except:
+                  pass
 
-      backtest_start_date = stks[i].index[0]
-      sell, buy = getsellbuy(portfolio, stocks_profit, stocks_loss)
+          backtest_start_date = stks[i].index[0]
+          sell, buy = getsellbuy(portfolio, stocks_profit, stocks_loss)
+      except:
+          # yahoo api changes the index from utc or localized value between market open and close
+          # in that case we may get an exception. Wait for 60 seconds and try again
+          sleep(60)
+          continue
    
       # process the stocks that are marked sell
       for st in sell.iterrows():
@@ -447,7 +459,7 @@ def do_one_backtesting():
           current_account += portfolio[stock]['shares'] * stks[stock].loc[backtest_start_date]["Close"]
           stocks_sold.loc[backtest_start_date, stock] = portfolio[stock]['shares'] * stks[stock].loc[backtest_start_date]["Close"]
           portfolio.pop(stock)
-      
+
       # buy stocks that are marked by. We are buying max_stocks_to_buy number of stocks
       # TODO: The number of stocks to be must be adaptive. Will come up with some
       # algorithm based on:
@@ -457,6 +469,14 @@ def do_one_backtesting():
       # The goal is to put the money to work
       for st in buy.iterrows():
         stock = st[0].split('_')[0]
+        try:
+            earning_calls_date=pd.to_datetime(r.get_earnings(st)[-2]['call']['datetime']).tz_convert('America/New_York')
+            delta = pd.Timestamp.utcnow() - earning_calls_date
+            if delta.days > 0 and delta.days < 4:
+                # skip the stock for few days after earnings call
+                continue
+        except:
+            pass
         if current_account > max_stocks_to_buy * stks[stock].loc[backtest_start_date]["Close"]:
           current_account -= max_stocks_to_buy * stks[stock].loc[backtest_start_date]["Close"]
           if not stock in portfolio:
@@ -492,10 +512,10 @@ def do_one_backtesting():
       networth = current_account
       total_gain = 0;
       for s, v in portfolio.items():
-          networth += stks[s]["Close"][0]
-          total_gain += stks[s]["Close"][0] - v['costs'][0]
-          gain = stks[s]["Close"][0] - v['costs'][0]
-          print("%s\t%s\t%f\t%f\t%f" % (s, str(v['date']), v['costs'][0], stks[s]["Close"][0], gain))
+          networth += v['shares'] * stks[s]["Close"][0]
+          total_gain += v['shares'] * (stks[s]["Close"][0] - v['costs'][0])
+          gain = v['shares'] * (stks[s]["Close"][0] - v['costs'][0])
+          print("%s(%d)\t%s\t%f\t%f\t%f" % (s, v['shares'], str(v['date']), v['costs'][0], stks[s]["Close"][0], gain))
       print("Completed one iteration with unrealized total gain: %f and networth: %f" % (total_gain, networth))
       print("=======================================================")
       sleep(15 * 60)
